@@ -1,5 +1,6 @@
 import json
-import socket
+import concurrent.futures
+import threading
 from time import sleep
 from loguru import logger
 import paramiko
@@ -11,9 +12,12 @@ SSH_PASSWORD = ''
 SSH_TIMEOUT = 5  # in seconds
 OUTPUT_DIR = 'output/'  # output directory for logs and result files
 INPUT_FILE = 'prism_ips.txt'
-# OUTPUT_JSON_FILE_AVAIL = 'result_avail.json'
-# OUTPUT_JSON_FILE_UPTIME = 'result_uptime.json'
 GET_PART_ROWS = 3  # part of rows to get from sorted dictionary, where 3 means 1/3 of rows, 4 means 1/4 of rows, etc.
+
+# For multithreading
+AVAIL_DICT_LOCK = threading.Lock()
+UPTIME_DICT_LOCK = threading.Lock()
+MAX_WORKERS = 5  # not more than 10 threads!!!
 
 AVAIL_DICT = {}
 UPTIME_DICT = {}
@@ -162,9 +166,13 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     cut_off = False if len(svm_dict) <= GET_PART_ROWS else True
     average = get_average_from_dict(svm_dict, 'available', cut_off=cut_off)
     # Write down to dictionary with prism_address as key and available memory as value
-    AVAIL_DICT[prism_address] = {
-        'available': average,
-    }
+    AVAIL_DICT_LOCK.acquire()
+    try:
+        AVAIL_DICT[prism_address] = {
+            'available': average,
+        }
+    finally:
+        AVAIL_DICT_LOCK.release()
     return AVAIL_DICT
 
 
@@ -218,9 +226,13 @@ def get_all_ssh_uptime(prism_address: str,svm_list: []) -> {}:
     cut_off = False if len(svm_dict) <= GET_PART_ROWS else True
     average = get_average_from_dict(svm_dict, 'uptime', cut_off=cut_off)
     # Write down to dictionary with prism_address as key and uptime as value
-    UPTIME_DICT[prism_address] = {
-        'uptime': average,
-    }
+    UPTIME_DICT_LOCK.acquire()
+    try:
+        UPTIME_DICT[prism_address] = {
+            'uptime': average,
+        }
+    finally:
+        UPTIME_DICT_LOCK.release()
     return UPTIME_DICT
 
 
@@ -284,30 +296,63 @@ def print_dicts(uptime_dict, avail_dict):
 
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
-        print("{:>2d}. {:<20} {:>3} up | {:<20} {:<3} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
+        print("{:>2d}. {:<30} {:>3} up | {:<30} {:<3} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
+
+
+# def main():
+#     prism_addresses = get_prism_addresses_from_file(INPUT_FILE)
+#     for prism_address in prism_addresses:
+#         svm_ips = get_svm_ips_from_server(prism_address)
+#         if svm_ips.success:
+#             svm_ips = svm_ips.data
+#             # Get available memory
+#             get_all_ssh_available_mem(prism_address, svm_ips)
+#             # Get uptime
+#             get_all_ssh_uptime(prism_address, svm_ips)
+#         else:
+#             logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
+#     if not UPTIME_DICT or not AVAIL_DICT:
+#         logger.error(f'Error get uptime or available memory. len(UPTIME_DICT) = {len(UPTIME_DICT)}, len(AVAIL_DICT) = {len(AVAIL_DICT)}')
+#         return
+#     # Get sorted dicts
+#     sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
+#     sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
+#
+#     # Print sorted dicts
+#     print_dicts(sorted_uptime, sorted_avail)
 
 
 def main():
     prism_addresses = get_prism_addresses_from_file(INPUT_FILE)
-    for prism_address in prism_addresses:
-        svm_ips = get_svm_ips_from_server(prism_address)
-        if svm_ips.success:
-            svm_ips = svm_ips.data
-            # Get available memory
-            get_all_ssh_available_mem(prism_address, svm_ips)
-            # Get uptime
-            get_all_ssh_uptime(prism_address, svm_ips)
-        else:
-            logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
-    if not UPTIME_DICT or not AVAIL_DICT:
-        logger.error(f'Error get uptime or available memory. len(UPTIME_DICT) = {len(UPTIME_DICT)}, len(AVAIL_DICT) = {len(AVAIL_DICT)}')
-        return
+    # Running in threads to speed up
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = []
+        for prism_address in prism_addresses:
+            future = executor.submit(process_prism_address, prism_address)
+            futures.append(future)
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f'Exception: {e}')
     # Get sorted dicts
     sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
     sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
 
     # Print sorted dicts
     print_dicts(sorted_uptime, sorted_avail)
+
+
+def process_prism_address(prism_address):
+    svm_ips = get_svm_ips_from_server(prism_address)
+    if svm_ips.success:
+        svm_ips = svm_ips.data
+        # Get available memory
+        get_all_ssh_available_mem(prism_address, svm_ips)
+        # Get uptime
+        get_all_ssh_uptime(prism_address, svm_ips)
+    else:
+        logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
 
 
 if __name__ == '__main__':
