@@ -275,7 +275,7 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
 
 def print_dicts(uptime_dict, avail_dict):
     # Print table header
-    print("{:<34}{:<20}".format("Uptime", "Free"))
+    print("{:<52}{:<30}".format("Uptime (avr)", "Free (avr)"))
 
     # Get keys from first dictionaries
     keys = list(uptime_dict.keys())
