@@ -18,7 +18,7 @@ GET_PART_ROWS = 3  # part of rows to get from sorted dictionary, where 3 means 1
 AVAIL_DICT = {}
 UPTIME_DICT = {}
 
-logger.add(f'{OUTPUT_DIR}logs/bot.log', format='{time:DD-MM-YY HH:mm:ss} - {level} - {message}',
+logger.add(f'{OUTPUT_DIR}logs/main.log', format='{time:DD-MM-YY HH:mm:ss} - {level} - {message}',
            level='INFO', rotation='1 week', compression='zip')
 
 
@@ -66,14 +66,14 @@ def get_svm_ips_from_server(server: str) -> ResultReturn:
         # get svm ips
         ips = std_out[0].strip()
         try:
-            # Check if ips is valid
+            # Check if ip is valid
             ips = ips.split()
             for i in ips:
                 ipaddress.IPv4Address(i)
                 svm_ips.append(i)
         except ValueError:
-            logger.error(f' - Error getting svm_ips: {out_error}')
-            result.error = f'Error getting svm_ips: {out_error}'
+            logger.error(f' - Error getting svm_ips: {ips}')
+            result.error = f'Error getting svm_ips: {ips}'
             return result
         result.success = True
         result.data = svm_ips
