@@ -263,7 +263,7 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
 
 def print_dicts(uptime_dict, avail_dict):
     # Print table header
-    print("{:<32}{:<20}".format("Uptime", "Free"))
+    print("{:<34}{:<20}".format("Uptime", "Free"))
 
     # Get keys from first dictionaries
     keys = list(uptime_dict.keys())
@@ -299,11 +299,8 @@ def main():
             get_all_ssh_uptime(prism_address, svm_ips)
         else:
             logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
-    if not AVAIL_DICT or not UPTIME_DICT:
-        logger.error('Error get available memory or uptime')
-        return
-    if not UPTIME_DICT and not AVAIL_DICT:
-        logger.error('Error get uptime and available memory')
+    if not UPTIME_DICT or not AVAIL_DICT:
+        logger.error(f'Error get uptime or available memory. len(UPTIME_DICT) = {len(UPTIME_DICT)}, len(AVAIL_DICT) = {len(AVAIL_DICT)}')
         return
     # Get sorted dicts
     sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
