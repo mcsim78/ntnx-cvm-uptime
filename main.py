@@ -102,13 +102,12 @@ def get_average_from_dict(svm_dict: {}, key: str, cut_off=False) -> int:
     Get average value from dictionary
     """
     # Sort dictionary by value
-    sliced_dict = svm_dict
     sort = False if key == 'available' else True
-    sliced_dict = sort_dict_by_value(dict_to_sort=sliced_dict, key_name=key, reverse_sort=sort)
+    sliced_dict = sort_dict_by_value(dict_to_sort=svm_dict, key_name=key, reverse_sort=sort)
     if cut_off:
         sliced_dict = get_first_rows(sliced_dict, GET_PART_ROWS)
     summ = 0
-    for svm in svm_dict:
+    for svm in sliced_dict:
         summ += int(sliced_dict[svm][key])
     return int(summ / len(sliced_dict))
 
