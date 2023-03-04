@@ -271,11 +271,11 @@ def print_dicts(uptime_dict, avail_dict):
     # Iterate over keys and print values from both dictionaries. Second dictionary left origin ordered.
     for i, key in enumerate(keys):
         # Get values from both dictionaries
-        # TODO: Check for index out of range!!!
-        if i > len(avail_dict.keys()):
+        if i + 1 > len(avail_dict.keys()):
             value2 = {
-                'available': '---',
+                'available': 0,
             }
+            key2 = '---'
         else:
             key2 = list(avail_dict.keys())[i]
             value2 = avail_dict[key2]
@@ -284,8 +284,7 @@ def print_dicts(uptime_dict, avail_dict):
 
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
-        print("{:>2d}. {:<20} {:>3} up {:<20} {:<3} GB".format(i + 1, key, value1["uptime"],
-                                                               keys[(i + 1) % len(keys)], avail_gb))
+        print("{:>2d}. {:<20} {:>3} up | {:<20} {:<3} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
 
 
 def main():
