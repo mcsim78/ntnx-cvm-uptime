@@ -11,8 +11,8 @@ SSH_PASSWORD = ''
 SSH_TIMEOUT = 5  # in seconds
 OUTPUT_DIR = 'output/'  # output directory for logs and result files
 INPUT_FILE = 'prism_ips.txt'
-OUTPUT_JSON_FILE_AVAIL = 'result_avail.json'
-OUTPUT_JSON_FILE_UPTIME = 'result_uptime.json'
+# OUTPUT_JSON_FILE_AVAIL = 'result_avail.json'
+# OUTPUT_JSON_FILE_UPTIME = 'result_uptime.json'
 GET_PART_ROWS = 3  # part of rows to get from sorted dictionary, where 3 means 1/3 of rows, 4 means 1/4 of rows, etc.
 
 AVAIL_DICT = {}
@@ -82,7 +82,7 @@ def get_svm_ips_from_server(server: str) -> ResultReturn:
     return result
 
 
-def get_svm_ips_from_file(filepath: str) -> []:
+def get_prism_addresses_from_file(filepath: str) -> []:
     """
     Load SVM IPs from file to list
     :param filepath:
@@ -91,22 +91,39 @@ def get_svm_ips_from_file(filepath: str) -> []:
     svm_ips = []
     with open(filepath, 'r') as f:
         for line in f:
-            if line.strip() == '':
+            if line.strip() == '' or line.strip().startswith('#'):
                 continue
             svm_ips.append(line.strip())
     return svm_ips
 
 
-def get_all_ssh_available_mem(svm_list: []) -> {}:
+def get_average_from_dict(svm_dict: {}, key: str, cut_off=False) -> int:
+    """
+    Get average value from dictionary
+    """
+    # Sort dictionary by value
+    sliced_dict = svm_dict
+    sort = False if key == 'available' else True
+    sliced_dict = sort_dict_by_value(dict_to_sort=sliced_dict, key_name=key, reverse_sort=sort)
+    if cut_off:
+        sliced_dict = get_first_rows(sliced_dict, GET_PART_ROWS)
+    summ = 0
+    for svm in svm_dict:
+        summ += int(sliced_dict[svm][key])
+    return int(summ / len(sliced_dict))
+
+
+def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     """
     Get available memory for all SVMs
+    :param prism_address: Address (ip or fqdn) of Prism
     :param svm_list: list of ip addresses for getting available memory
     :return: Dictionary with ip addresses as keys and available memory as values
     """
     cmd = "free | grep '^Mem:' | awk '{print $7}'"
     ssh_client = paramiko.SSHClient()
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    # svm_dict = {}
+    svm_dict = {}
     for ip in svm_list:
         ssh_client.close()
         try:
@@ -114,7 +131,7 @@ def get_all_ssh_available_mem(svm_list: []) -> {}:
                                password=SSH_PASSWORD, timeout=SSH_TIMEOUT)
             sleep(0.5)
         except Exception as e:
-            AVAIL_DICT[ip] = {
+            svm_dict[ip] = {
                 'available': 0,
                 'error': f'Connection failed: {e}'
             }
@@ -126,24 +143,36 @@ def get_all_ssh_available_mem(svm_list: []) -> {}:
         out_error = stderr.readlines()
         if not out_error:
             available = std_out[0].strip()
-            AVAIL_DICT[ip] = {
+            svm_dict[ip] = {
                 'available': available,
                 'error': 'none'
             }
         else:
-            AVAIL_DICT[ip] = {
+            svm_dict[ip] = {
                 'available': 0,
                 'error': f'Error exec command "{cmd}"'
             }
             logger.error(f' - Error exec command "{cmd}" on {ip}: {out_error}')
     ssh_client.close()
     logger.info(f'  No errors')
+    save_dict_to_json(svm_dict, f'{OUTPUT_DIR}avail_{prism_address}.json')
+    logger.info(f'+ Getting average available memory for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
+    # Cut off unneeded part of dictionary
+    # Summ all available memory and get average of left CVMs
+
+    cut_off = False if len(svm_dict) <= GET_PART_ROWS else True
+    average = get_average_from_dict(svm_dict, 'available', cut_off=cut_off)
+    # Write down to dictionary with prism_address as key and available memory as value
+    AVAIL_DICT[prism_address] = {
+        'available': average,
+    }
     return AVAIL_DICT
 
 
-def get_all_ssh_uptime(svm_list: []) -> {}:
+def get_all_ssh_uptime(prism_address: str,svm_list: []) -> {}:
     """
     Get uptime for all SVMs
+    :param prism_address:
     :param svm_list: List of ip addresses for getting uptime
     :return: Dictionary with ip addresses as keys and uptime as values
     """
@@ -151,7 +180,7 @@ def get_all_ssh_uptime(svm_list: []) -> {}:
     cmd = "uptime | grep days | awk '{print $3}'"
     ssh_client = paramiko.SSHClient()
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    # svm_dict = {}
+    svm_dict = {}
     for ip in svm_list:
         ssh_client.close()
         try:
@@ -159,7 +188,7 @@ def get_all_ssh_uptime(svm_list: []) -> {}:
                                password=SSH_PASSWORD, timeout=SSH_TIMEOUT)
             sleep(0.5)
         except Exception as e:
-            UPTIME_DICT[ip] = {
+            svm_dict[ip] = {
                 'uptime': 0,
                 'error': f'Connection failed: {e}'
             }
@@ -171,24 +200,34 @@ def get_all_ssh_uptime(svm_list: []) -> {}:
         out_error = stderr.readlines()
         if not out_error:
             uptime = std_out[0].strip()
-            UPTIME_DICT[ip] = {
+            svm_dict[ip] = {
                 'uptime': uptime,
                 'error': 'none'
             }
         else:
-            UPTIME_DICT[ip] = {
+            svm_dict[ip] = {
                 'uptime': 0,
                 'error': f'Error exec command "{cmd}"'
             }
             logger.error(f' - Error exec command "{cmd}" for {ip}')
     ssh_client.close()
     logger.info(f'  No errors')
+    save_dict_to_json(svm_dict, f'{OUTPUT_DIR}uptime_{prism_address}.json')
+    logger.info(f'+ Getting average uptime for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
+    # 1.Cut off unneeded part of dictionary
+    # 2.Summ all uptime and get average of left CVMs
+    cut_off = False if len(svm_dict) <= GET_PART_ROWS else True
+    average = get_average_from_dict(svm_dict, 'uptime', cut_off=cut_off)
+    # Write down to dictionary with prism_address as key and uptime as value
+    UPTIME_DICT[prism_address] = {
+        'uptime': average,
+    }
     return UPTIME_DICT
 
 
 def sort_dict_by_value(dict_to_sort: {}, key_name: str, reverse_sort: True) -> {}:
     """
-    Sort dict by available memory and uptime. Available memory converted from KB to GB
+    Sort dict by available memory and uptime.
     :param reverse_sort:
     :param key_name:
     :param dict_to_sort:
@@ -218,22 +257,9 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
     :return: Dictionary with filtered rows
     """
     rows_count = divmod(len(data_dict), divider)[0]  # Getting an integer from division
+    rows_count = 1 if rows_count == 0 else rows_count
     sliced_dict = {k: v for i, (k, v) in enumerate(data_dict.items()) if i < rows_count}
     return sliced_dict
-
-
-def resolve_ip_to_fqdn(ip_address):
-    """
-    Resolve IP address to FQDN. If cannot resolve, then return IP address
-    :param ip_address:
-    :return: FQDN or IP address
-    """
-    try:
-        fqdn = socket.gethostbyaddr(ip_address)[0]
-    except socket.herror:
-        logger.error(f' - Cannot resolve {ip_address} to FQDN. Keep IP address')
-        fqdn = ip_address
-    return fqdn
 
 
 def print_dicts(uptime_dict, avail_dict):
@@ -247,56 +273,43 @@ def print_dicts(uptime_dict, avail_dict):
     for i, key in enumerate(keys):
         # Get values from both dictionaries
         # TODO: Check for index out of range!!!
-        key2 = list(avail_dict.keys())[i]
+        if i > len(avail_dict.keys()):
+            value2 = {
+                'available': '---',
+            }
+        else:
+            key2 = list(avail_dict.keys())[i]
+            value2 = avail_dict[key2]
 
         value1 = uptime_dict[key]
-        value2 = avail_dict[key2]
 
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
-        print("{:<2d}. {:<20} {:>3} up {:<20} {:<3} GB".format(i + 1, key, value1["uptime"],
+        print("{:>2d}. {:<20} {:>3} up {:<20} {:<3} GB".format(i + 1, key, value1["uptime"],
                                                                keys[(i + 1) % len(keys)], avail_gb))
 
 
 def main():
-    prism_addresses = get_svm_ips_from_file(INPUT_FILE)
+    prism_addresses = get_prism_addresses_from_file(INPUT_FILE)
     for prism_address in prism_addresses:
         svm_ips = get_svm_ips_from_server(prism_address)
         if svm_ips.success:
             svm_ips = svm_ips.data
             # Get available memory
-            get_all_ssh_available_mem(svm_ips)
+            get_all_ssh_available_mem(prism_address, svm_ips)
             # Get uptime
-            get_all_ssh_uptime(svm_ips)
+            get_all_ssh_uptime(prism_address, svm_ips)
         else:
             logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
     if not AVAIL_DICT or not UPTIME_DICT:
         logger.error('Error get available memory or uptime')
         return
-    # Get sorted dicts
-    sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
-    # Try to resolve IP to FQDN
-    sorted_avail = {resolve_ip_to_fqdn(k): v for k, v in sorted_avail.items()}
-    # Save sorted dicts to json files
-    save_dict_to_json(sorted_avail, f'{OUTPUT_DIR}{OUTPUT_JSON_FILE_AVAIL}')
-    # ==================================================
-    # Uncomment next line to get part of sorted dicts
-    # sorted_avail = get_first_rows(sorted_avail, GET_PART_ROWS)
-    # ==================================================
-
     if not UPTIME_DICT and not AVAIL_DICT:
         logger.error('Error get uptime and available memory')
         return
-
+    # Get sorted dicts
+    sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
     sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
-    # Try to resolve IP to FQDN
-    sorted_uptime = {resolve_ip_to_fqdn(k): v for k, v in sorted_uptime.items()}
-    # Save sorted dicts to json files
-    save_dict_to_json(sorted_uptime, f'{OUTPUT_DIR}{OUTPUT_JSON_FILE_UPTIME}')
-    # ==================================================
-    # Uncomment next line to get part of sorted dicts
-    # sorted_uptime = get_first_rows(sorted_uptime, GET_PART_ROWS)
-    # ==================================================
 
     # Print sorted dicts
     print_dicts(sorted_uptime, sorted_avail)
