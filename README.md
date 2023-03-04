@@ -1,6 +1,6 @@
 # HOW TO USE
 1. Install the latest Python3 version from https://www.python.org/downloads/
-2. unzip the archive and cd into the directory
+2. Clone git and cd into the directory
 3. python -m venv venv
 4. source venv/bin/activate (for linux) or venv\Scripts\activate.bat (for windows)
 5. pip install -r requirements.txt
