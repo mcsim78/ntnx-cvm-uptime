@@ -1,3 +1,4 @@
+import getpass
 import json
 import concurrent.futures
 import threading
@@ -15,12 +16,16 @@ INPUT_FILE = 'prism_ips.txt'
 GET_PART_ROWS = 3  # part of rows to get from sorted dictionary, where 3 means 1/3 of rows, 4 means 1/4 of rows, etc.
 
 # For multithreading
-AVAIL_DICT_LOCK = threading.Lock()
-UPTIME_DICT_LOCK = threading.Lock()
-MAX_WORKERS = 5  # not more than 10 threads!!!
-
 AVAIL_DICT = {}
 UPTIME_DICT = {}
+MAX_WORKERS = 4  # not more than 10 threads!!!
+TEMP_CREDS = {}
+AVAIL_DICT_LOCK = threading.Lock()
+UPTIME_DICT_LOCK = threading.Lock()
+TEMP_CREDS_LOCK = threading.Lock()
+INPUT_EVENT = threading.Event()
+LOCK_TIMEOUT = 10  # in seconds. Max time to wait for lock release
+MAX_AUTH_ATTEMPTS = 2  # max attempts to authenticate to server
 
 logger.add(f'{OUTPUT_DIR}logs/main.log', format='{time:DD-MM-YY HH:mm:ss} - {level} - {message}',
            level='INFO', rotation='1 week', compression='zip')
@@ -37,6 +42,44 @@ class ResultReturn:
         self.error = error
 
 
+def attempt_to_auth_on_cvm(ssh_client: paramiko.SSHClient, prism_address: str) -> ResultReturn:
+    result = ResultReturn()
+    logger.warning(f'Authentication failed for for cluster "{prism_address}"')
+    INPUT_EVENT.set()
+    sleep(3)  # wait for other threads to stop printing to console
+    temp_ssh_user = input(f'\nEnter username for cluster "{prism_address}": ')
+    temp_ssh_password = getpass.getpass(f'Enter password for user "{temp_ssh_user}": ')
+    INPUT_EVENT.clear()  # Clear event to allow other threads to continue
+    if not temp_ssh_user or not temp_ssh_password:
+        logger.warning(f'Skip for cluster "{prism_address}"')
+        result.error = f'Username or password is empty for cluster "{prism_address}"'
+        return result
+
+    try:
+        if temp_ssh_password:
+            ssh_client.connect(hostname=prism_address, port=SSH_PORT, username=temp_ssh_user,
+                               password=temp_ssh_password, timeout=SSH_TIMEOUT)
+            logger.info(f'Authentication success for "{prism_address}"')
+        sleep(0.5)
+    except paramiko.ssh_exception.AuthenticationException:
+        logger.error(f'Authentication failed for "{prism_address}"')
+        result.error = f'Authentication failed "{prism_address}"'
+        return result
+    except Exception as e:
+        logger.error(f'Exception: {e}')
+        result.error = f'Exception: {e}'
+    # If no errors
+    TEMP_CREDS_LOCK.acquire()
+    try:
+        TEMP_CREDS[prism_address] = {'username': temp_ssh_user, 'password': temp_ssh_password}
+        result.success = True
+        result.data = ssh_client
+    finally:
+        TEMP_CREDS_LOCK.release()
+
+    return result
+
+
 def get_svm_ips_from_server(server: str) -> ResultReturn:
     """
     Get SVM IPs from server. Use standard Nutanix command: /usr/local/nutanix/cluster/bin/svmips
@@ -46,22 +89,33 @@ def get_svm_ips_from_server(server: str) -> ResultReturn:
     result = ResultReturn()
     svm_ips = []
     cmd_svm_ips = '/usr/local/nutanix/cluster/bin/svmips'
+    auth_attempts = 1
 
     logger.info(f'+ Getting SVM IPs for server: {server}')
     ssh_client = paramiko.SSHClient()
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        ssh_client.connect(hostname=server, port=SSH_PORT, username=SSH_USERNAME, password=SSH_PASSWORD)
-        sleep(2)
-    except paramiko.ssh_exception.AuthenticationException:
-        logger.error(f'Authentication failed for "{server}", please verify your credentials')
-        result.error = f'Authentication failed "{server}", please verify your credentials'
-        return result
+        ssh_client.connect(hostname=server, port=SSH_PORT, username=SSH_USERNAME,
+                           password=SSH_PASSWORD, timeout=SSH_TIMEOUT)
+        # sleep(0.5)
+    except paramiko.AuthenticationException:
+        if auth_attempts == MAX_AUTH_ATTEMPTS:
+            logger.error(f'Authentication failed for for cluster "{server}". Skipping...')
+            return result
+        else:
+            auth_attempts += 1
     except OSError as excpt:
         logger.error(f'Error occurred for "{server}": {excpt}')
         result.error = f'Error occurred for "{server}": {excpt}'
         return result
 
+    # Try another auth attempt if first failed
+    if auth_attempts == MAX_AUTH_ATTEMPTS:
+        result = attempt_to_auth_on_cvm(ssh_client=ssh_client, prism_address=server)
+        if result.success:
+            ssh_client = result.data
+        else:
+            return result
     # get svm ips
     stdin, stdout, stderr = ssh_client.exec_command(cmd_svm_ips)
     std_out = stdout.readlines()
@@ -82,7 +136,7 @@ def get_svm_ips_from_server(server: str) -> ResultReturn:
         result.success = True
         result.data = svm_ips
     ssh_client.close()
-    logger.info(f'  No errors')
+    # logger.info(f'  No errors')
     return result
 
 
@@ -116,6 +170,21 @@ def get_average_from_dict(svm_dict: {}, key: str, cut_off=False) -> int:
     return int(summ / len(sliced_dict))
 
 
+def get_tmp_creds(prism_address):
+    """
+    Get temporary credentials for ssh if they exist, otherwise return defaults
+    :param prism_address:
+    :return:
+    """
+    try:
+        tmp_ssh_user = TEMP_CREDS[prism_address]['username']
+        tmp_ssh_password = TEMP_CREDS[prism_address]['password']
+    except KeyError:
+        tmp_ssh_user = SSH_USERNAME
+        tmp_ssh_password = SSH_PASSWORD
+    return tmp_ssh_password, tmp_ssh_user
+
+
 def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     """
     Get available memory for all SVMs
@@ -127,12 +196,18 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     ssh_client = paramiko.SSHClient()
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     svm_dict = {}
+    # Try to get temporary credentials if they exist for this cluster, otherwise use default
+    tmp_ssh_password, tmp_ssh_user = get_tmp_creds(prism_address)
+
     for ip in svm_list:
+        while INPUT_EVENT.is_set():
+            INPUT_EVENT.wait(LOCK_TIMEOUT)
+
         ssh_client.close()
         try:
-            ssh_client.connect(hostname=ip, port=SSH_PORT, username=SSH_USERNAME,
-                               password=SSH_PASSWORD, timeout=SSH_TIMEOUT)
-            sleep(0.5)
+            ssh_client.connect(hostname=ip, port=SSH_PORT, username=tmp_ssh_user,
+                               password=tmp_ssh_password, timeout=SSH_TIMEOUT)
+            # sleep(0.5)
         except Exception as e:
             svm_dict[ip] = {
                 'available': 0,
@@ -157,12 +232,12 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
             }
             logger.error(f' - Error exec command "{cmd}" on {ip}: {out_error}')
     ssh_client.close()
-    logger.info(f'  No errors')
+    # logger.info(f'  No errors')
     save_dict_to_json(svm_dict, f'{OUTPUT_DIR}avail_{prism_address}.json')
-    logger.info(f'+ Getting average available memory for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
+    # logger.info(
+    #     f'+ Getting average available memory for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
     # Cut off unneeded part of dictionary
     # Summ all available memory and get average of left CVMs
-
     cut_off = False if len(svm_dict) <= GET_PART_ROWS else True
     average = get_average_from_dict(svm_dict, 'available', cut_off=cut_off)
     # Write down to dictionary with prism_address as key and available memory as value
@@ -176,24 +251,29 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     return AVAIL_DICT
 
 
-def get_all_ssh_uptime(prism_address: str,svm_list: []) -> {}:
+def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
     """
     Get uptime for all SVMs
     :param prism_address:
     :param svm_list: List of ip addresses for getting uptime
     :return: Dictionary with ip addresses as keys and uptime as values
     """
-    # return exec_allssh_command(server, "uptime | grep days | awk '{print $3}'")
-    cmd = "uptime | grep days | awk '{print $3}'"
+    # cmd = "uptime | grep days | awk '{print $3}'"
+    cmd = "cat /proc/uptime | awk '{print $1}'"  # uptime in seconds
     ssh_client = paramiko.SSHClient()
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     svm_dict = {}
+    # Try to get temporary credentials if they exist for this cluster, otherwise use default
+    tmp_ssh_password, tmp_ssh_user = get_tmp_creds(prism_address)
     for ip in svm_list:
+        while INPUT_EVENT.is_set():
+            INPUT_EVENT.wait(LOCK_TIMEOUT)
+
         ssh_client.close()
         try:
-            ssh_client.connect(hostname=ip, port=SSH_PORT, username=SSH_USERNAME,
-                               password=SSH_PASSWORD, timeout=SSH_TIMEOUT)
-            sleep(0.5)
+            ssh_client.connect(hostname=ip, port=SSH_PORT, username=tmp_ssh_user,
+                               password=tmp_ssh_password, timeout=SSH_TIMEOUT)
+            # sleep(0.5)
         except Exception as e:
             svm_dict[ip] = {
                 'uptime': 0,
@@ -205,12 +285,20 @@ def get_all_ssh_uptime(prism_address: str,svm_list: []) -> {}:
         stdin, stdout, stderr = ssh_client.exec_command(cmd)
         std_out = stdout.readlines()
         out_error = stderr.readlines()
-        if not out_error:
-            uptime = std_out[0].strip()
-            svm_dict[ip] = {
-                'uptime': uptime,
-                'error': 'none'
-            }
+        if not out_error and std_out:
+            up_sec = float(std_out[0].strip())
+            if up_sec > 86400:
+                uptime = round(up_sec / 86400)
+                svm_dict[ip] = {
+                    'uptime': uptime,
+                    'error': 'none'
+                }
+            else:
+                svm_dict[ip] = {
+                    'uptime': 0,
+                    'error': f'Uptime less than 1 day'
+                    }
+            # uptime = std_out[0].strip()
         else:
             svm_dict[ip] = {
                 'uptime': 0,
@@ -218,9 +306,9 @@ def get_all_ssh_uptime(prism_address: str,svm_list: []) -> {}:
             }
             logger.error(f' - Error exec command "{cmd}" for {ip}')
     ssh_client.close()
-    logger.info(f'  No errors')
+    # logger.info(f'  No errors')
     save_dict_to_json(svm_dict, f'{OUTPUT_DIR}uptime_{prism_address}.json')
-    logger.info(f'+ Getting average uptime for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
+    # logger.info(f'+ Getting average uptime for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
     # 1.Cut off unneeded part of dictionary
     # 2.Summ all uptime and get average of left CVMs
     cut_off = False if len(svm_dict) <= GET_PART_ROWS else True
@@ -257,7 +345,7 @@ def save_dict_to_json(dict_to_save: {}, filepath: str):
     """
     with open(filepath, 'w') as f:
         json.dump(dict_to_save, f, indent=4)
-        logger.info(f'+ Result saved to {filepath}')
+        # logger.info(f'+ Result saved to {filepath}')
 
 
 def get_first_rows(data_dict: {}, divider: int) -> {}:
@@ -275,7 +363,7 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
 
 def print_dicts(uptime_dict, avail_dict):
     # Print table header
-    print("{:<52}{:<30}".format("Uptime (avr)", "Free (avr)"))
+    print("{:<55}{:<30}".format("Uptime (average)", "Free (average)"))
 
     # Get keys from first dictionaries
     keys = list(uptime_dict.keys())
@@ -296,30 +384,7 @@ def print_dicts(uptime_dict, avail_dict):
 
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
-        print("{:>2d}. {:<30} {:>3} up | {:<30} {:<3} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
-
-
-# def main():
-#     prism_addresses = get_prism_addresses_from_file(INPUT_FILE)
-#     for prism_address in prism_addresses:
-#         svm_ips = get_svm_ips_from_server(prism_address)
-#         if svm_ips.success:
-#             svm_ips = svm_ips.data
-#             # Get available memory
-#             get_all_ssh_available_mem(prism_address, svm_ips)
-#             # Get uptime
-#             get_all_ssh_uptime(prism_address, svm_ips)
-#         else:
-#             logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
-#     if not UPTIME_DICT or not AVAIL_DICT:
-#         logger.error(f'Error get uptime or available memory. len(UPTIME_DICT) = {len(UPTIME_DICT)}, len(AVAIL_DICT) = {len(AVAIL_DICT)}')
-#         return
-#     # Get sorted dicts
-#     sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
-#     sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
-#
-#     # Print sorted dicts
-#     print_dicts(sorted_uptime, sorted_avail)
+        print("{:>2d}. {:<42} {:>3} up | {:<30} {:>5} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
 
 
 def main():
@@ -335,15 +400,11 @@ def main():
                 future.result()
             except Exception as e:
                 logger.error(f'Exception: {e}')
-    # Get sorted dicts
-    sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
-    sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
-
-    # Print sorted dicts
-    print_dicts(sorted_uptime, sorted_avail)
 
 
 def process_prism_address(prism_address):
+    while INPUT_EVENT.is_set():
+        INPUT_EVENT.wait(LOCK_TIMEOUT)
     svm_ips = get_svm_ips_from_server(prism_address)
     if svm_ips.success:
         svm_ips = svm_ips.data
@@ -356,10 +417,26 @@ def process_prism_address(prism_address):
 
 
 if __name__ == '__main__':
+    if not SSH_PASSWORD:
+        logger.warning('No password provided. Will be asked during script execution.')
+        SSH_PASSWORD = getpass.getpass(
+            prompt=f'Enter SSH password for user "{SSH_USERNAME}" that can be used on the most clusters: '
+        )
+        if not SSH_PASSWORD:
+            raise Exception('No password provided.')
     try:
         logger.info('===== Start collecting data =====')
         main()
     except Exception as e:
         logger.error(f'Error: {e}')
         raise e
-    logger.info('===== End collecting data =====')
+    logger.info('===== End collecting data =====\n')
+    # Sort and print dicts
+    if AVAIL_DICT and UPTIME_DICT:
+        print('===== Collected data =====')
+        # Get sorted dicts
+        sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
+        sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
+        # Print sorted dicts
+        print_dicts(sorted_uptime, sorted_avail)
+        print('======================\n')
