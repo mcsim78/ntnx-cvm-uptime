@@ -4,6 +4,7 @@ import concurrent.futures
 import os
 import threading
 from time import sleep
+import openpyxl
 from loguru import logger
 import paramiko
 import ipaddress
@@ -15,6 +16,7 @@ SSH_TIMEOUT = 5  # in seconds
 OUTPUT_DIR = 'output/'  # output directory for logs and result files
 INPUT_FILE = 'prism_ips.txt'
 GET_PART_ROWS = 3  # part of rows to get from sorted dictionary, where 3 means 1/3 of rows, 4 means 1/4 of rows, etc.
+SAVE_TO_XLSX = True  # save results to xlsx file
 
 # For multithreading
 AVAIL_DICT = {}
@@ -48,8 +50,10 @@ def attempt_to_auth_on_cvm(ssh_client: paramiko.SSHClient, prism_address: str) -
     logger.warning(f'Authentication failed for for cluster "{prism_address}"')
     INPUT_EVENT.set()
     sleep(3)  # wait for other threads to stop printing to console
-    temp_ssh_user = input(f'\nEnter username for cluster "{prism_address}": ')
-    temp_ssh_password = getpass.getpass(f'Enter password for user "{temp_ssh_user}": ')
+    temp_ssh_user = input(f'\nEnter username for cluster "{prism_address}" (Press Enter to skip auth attempt): ')
+    temp_ssh_password = ''
+    if temp_ssh_user:
+        temp_ssh_password = getpass.getpass(f'Enter password for user "{temp_ssh_user}": ')
     INPUT_EVENT.clear()  # Clear event to allow other threads to continue
     if not temp_ssh_user or not temp_ssh_password:
         logger.warning(f'Skip for cluster "{prism_address}"')
@@ -252,6 +256,7 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     try:
         AVAIL_DICT[prism_address] = {
             'available': average,
+            'hosts_count': len(svm_dict),
         }
     finally:
         AVAIL_DICT_LOCK.release()
@@ -325,6 +330,7 @@ def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
     try:
         UPTIME_DICT[prism_address] = {
             'uptime': average,
+            'hosts_count': len(svm_dict),
         }
     finally:
         UPTIME_DICT_LOCK.release()
@@ -355,6 +361,43 @@ def save_dict_to_json(dict_to_save: {}, filepath: str):
         # logger.info(f'+ Result saved to {filepath}')
 
 
+def save_to_xslxs(dict_to_save: {}, filepath: str):
+    """
+    Save dictionary to xlsx file
+    :param dict_to_save: What to save
+    :param filepath: Where to save
+    :return: Nothing
+    """
+    wb_obj = openpyxl.Workbook()
+    sheet_obj = wb_obj.active
+    sheet_obj.cell(row=1, column=1).value = 'Uptime (average)'
+    sheet_obj.cell(row=1, column=4).value = 'Free (average)'
+    sheet_obj.cell(row=2, column=1).value = '#'
+    sheet_obj.cell(row=2, column=2).value = 'Cluster'
+    sheet_obj.cell(row=2, column=3).value = 'Uptime, days'
+    sheet_obj.cell(row=2, column=4).value = 'Hosts'
+    sheet_obj.cell(row=2, column=5).value = 'Cluster'
+    sheet_obj.cell(row=2, column=6).value = 'Free memory, GB'
+    sheet_obj.cell(row=2, column=7).value = 'Hosts'
+    sheet_obj.merge_cells('A1:D1')
+    sheet_obj.merge_cells('E1:G1')
+    row = 3
+    for i, (k, v) in enumerate(dict_to_save.items()):
+        sheet_obj.cell(row=row, column=1).value = k
+        sheet_obj.cell(row=row, column=2).value = v['cluster_uptime']
+        sheet_obj.cell(row=row, column=3).value = v['uptime']
+        sheet_obj.cell(row=row, column=4).value = v['cluster_up_hosts']
+        sheet_obj.cell(row=row, column=5).value = v['cluster_avail']
+        sheet_obj.cell(row=row, column=6).value = v['available']
+        sheet_obj.cell(row=row, column=7).value = v['cluster_avail_hosts']
+        row += 1
+    columns_letter = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+    for letter in columns_letter:
+        col_dim = sheet_obj.column_dimensions[letter].auto_size
+        col_dim = True
+    wb_obj.save(filepath)
+
+
 def get_first_rows(data_dict: {}, divider: int) -> {}:
     """
     Get first rows from dictionary
@@ -369,6 +412,7 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
 
 
 def print_dicts(uptime_dict, avail_dict):
+    new_dict = {}
     # Print table header
     print('===== Collected data =====')
     print("{:<55}{:<30}".format("Uptime (average)", "Free (average)"))
@@ -382,6 +426,7 @@ def print_dicts(uptime_dict, avail_dict):
         if i + 1 > len(avail_dict.keys()):
             value2 = {
                 'available': 0,
+                'hosts_count': 0,
             }
             key2 = '---'
         else:
@@ -393,7 +438,16 @@ def print_dicts(uptime_dict, avail_dict):
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
         print("{:>2d}. {:<42} {:>3} up | {:<30} {:>5} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
+        new_dict[i + 1] = {
+            'cluster_uptime': key,
+            'cluster_up_hosts': value1['hosts_count'],
+            'uptime': value1['uptime'],
+            'cluster_avail': key2,
+            'cluster_avail_hosts': value2['hosts_count'],
+            'available': avail_gb,
+        }
     print('========================\n')
+    return new_dict
 
 
 def main():
@@ -455,4 +509,9 @@ if __name__ == '__main__':
         sorted_avail = sort_dict_by_key(AVAIL_DICT, key_name='available', reverse_sort=False)
         sorted_uptime = sort_dict_by_key(UPTIME_DICT, key_name='uptime', reverse_sort=True)
         # Print sorted dicts
-        print_dicts(sorted_uptime, sorted_avail)
+        merged_dict = print_dicts(sorted_uptime, sorted_avail)
+        # print(merged_dict)
+        if SAVE_TO_XLSX:
+            filename = f'{OUTPUT_DIR}clusters_stat.xlsx'
+            save_to_xslxs(merged_dict, filename)
+            print(f'===== Data saved to {filename} =====\n')
