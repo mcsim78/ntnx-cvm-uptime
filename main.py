@@ -1,6 +1,7 @@
 import getpass
 import json
 import concurrent.futures
+import os
 import threading
 from time import sleep
 from loguru import logger
@@ -54,14 +55,12 @@ def attempt_to_auth_on_cvm(ssh_client: paramiko.SSHClient, prism_address: str) -
         logger.warning(f'Skip for cluster "{prism_address}"')
         result.error = f'Username or password is empty for cluster "{prism_address}"'
         return result
-
     try:
-        if temp_ssh_password:
-            ssh_client.connect(hostname=prism_address, port=SSH_PORT, username=temp_ssh_user,
-                               password=temp_ssh_password, timeout=SSH_TIMEOUT)
-            logger.info(f'Authentication success for "{prism_address}"')
+        ssh_client.connect(hostname=prism_address, port=SSH_PORT, username=temp_ssh_user,
+                           password=temp_ssh_password, timeout=SSH_TIMEOUT)
+        logger.info(f'Authentication success for "{prism_address}"')
         sleep(0.5)
-    except paramiko.ssh_exception.AuthenticationException:
+    except paramiko.AuthenticationException:
         logger.error(f'Authentication failed for "{prism_address}"')
         result.error = f'Authentication failed "{prism_address}"'
         return result
@@ -120,7 +119,7 @@ def get_svm_ips_from_server(server: str) -> ResultReturn:
     stdin, stdout, stderr = ssh_client.exec_command(cmd_svm_ips)
     std_out = stdout.readlines()
     out_error = stderr.readlines()
-    if not out_error:
+    if not out_error and std_out:
         # get svm ips
         ips = std_out[0].strip()
         try:
@@ -135,6 +134,9 @@ def get_svm_ips_from_server(server: str) -> ResultReturn:
             return result
         result.success = True
         result.data = svm_ips
+    else:
+        logger.warning(f' - std_out for server {server} is probably empty. Skipped...')
+        result.error = f'std_out for server {server} is probably empty. Skipped...'
     ssh_client.close()
     # logger.info(f'  No errors')
     return result
@@ -146,6 +148,9 @@ def get_prism_addresses_from_file(filepath: str) -> []:
     :param filepath:
     :return: list of SVM IPs
     """
+    if not os.path.isfile(filepath):
+        logger.error(f'File "{filepath}" not found')
+        return []
     svm_ips = []
     with open(filepath, 'r') as f:
         for line in f:
@@ -164,6 +169,8 @@ def get_average_from_dict(svm_dict: {}, key: str, cut_off=False) -> int:
     sliced_dict = sort_dict_by_value(dict_to_sort=svm_dict, key_name=key, reverse_sort=sort)
     if cut_off:
         sliced_dict = get_first_rows(sliced_dict, GET_PART_ROWS)
+    if not sliced_dict:
+        return 0
     summ = 0
     for svm in sliced_dict:
         summ += int(sliced_dict[svm][key])
@@ -172,9 +179,9 @@ def get_average_from_dict(svm_dict: {}, key: str, cut_off=False) -> int:
 
 def get_tmp_creds(prism_address):
     """
-    Get temporary credentials for ssh if they exist, otherwise return defaults
-    :param prism_address:
-    :return:
+    Get user's entered credentials for ssh if they exist, otherwise return defaults
+    :param prism_address: Address (ip or fqdn) of Prism to get credentials for
+    :return: Tuple with username and password
     """
     try:
         tmp_ssh_user = TEMP_CREDS[prism_address]['username']
@@ -219,7 +226,7 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
         stdin, stdout, stderr = ssh_client.exec_command(cmd)
         std_out = stdout.readlines()
         out_error = stderr.readlines()
-        if not out_error:
+        if not out_error and std_out:
             available = std_out[0].strip()
             svm_dict[ip] = {
                 'available': available,
@@ -326,10 +333,10 @@ def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
 
 def sort_dict_by_value(dict_to_sort: {}, key_name: str, reverse_sort: True) -> {}:
     """
-    Sort dict by available memory and uptime.
-    :param reverse_sort:
-    :param key_name:
-    :param dict_to_sort:
+    Sort dict by key name
+    :param reverse_sort: If True - sort in reverse order, else - sort in normal order
+    :param key_name: Key name to sort by
+    :param dict_to_sort: Dictionary to sort
     :return: sorted dict
     """
     srt_dict = dict(sorted(dict_to_sort.items(), key=lambda item: (float(item[1][key_name])), reverse=reverse_sort))
@@ -352,7 +359,7 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
     """
     Get first rows from dictionary
     :param data_dict: Source dictionary
-    :param divider: What part of dictionary to get
+    :param divider: What part of dictionary to get. For example, if divider=2, then get first 1/2 (half) of dictionary
     :return: Dictionary with filtered rows
     """
     rows_count = divmod(len(data_dict), divider)[0]  # Getting an integer from division
@@ -389,6 +396,9 @@ def print_dicts(uptime_dict, avail_dict):
 
 def main():
     prism_addresses = get_prism_addresses_from_file(INPUT_FILE)
+    if not prism_addresses:
+        logger.error(f'No prism addresses found in {INPUT_FILE}')
+        return
     # Running in threads to speed up
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
