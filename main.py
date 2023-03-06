@@ -427,6 +427,11 @@ def process_prism_address(prism_address):
 
 
 if __name__ == '__main__':
+    if not SSH_USERNAME:
+        logger.warning('No username provided. Will be asked during script execution.')
+        SSH_USERNAME = input(f'Enter SSH username that can be used on the most clusters: ')
+        if not SSH_USERNAME:
+            raise Exception('No username provided.')
     if not SSH_PASSWORD:
         logger.warning('No password provided. Will be asked during script execution.')
         SSH_PASSWORD = getpass.getpass(
@@ -434,6 +439,7 @@ if __name__ == '__main__':
         )
         if not SSH_PASSWORD:
             raise Exception('No password provided.')
+    # Start collecting data
     try:
         logger.info('===== Start collecting data =====')
         main()
