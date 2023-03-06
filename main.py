@@ -166,7 +166,7 @@ def get_average_from_dict(svm_dict: {}, key: str, cut_off=False) -> int:
     """
     # Sort dictionary by value
     sort = False if key == 'available' else True
-    sliced_dict = sort_dict_by_value(dict_to_sort=svm_dict, key_name=key, reverse_sort=sort)
+    sliced_dict = sort_dict_by_key(dict_to_sort=svm_dict, key_name=key, reverse_sort=sort)
     if cut_off:
         sliced_dict = get_first_rows(sliced_dict, GET_PART_ROWS)
     if not sliced_dict:
@@ -331,7 +331,7 @@ def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
     return UPTIME_DICT
 
 
-def sort_dict_by_value(dict_to_sort: {}, key_name: str, reverse_sort: True) -> {}:
+def sort_dict_by_key(dict_to_sort: {}, key_name: str, reverse_sort: True) -> {}:
     """
     Sort dict by key name
     :param reverse_sort: If True - sort in reverse order, else - sort in normal order
@@ -370,6 +370,7 @@ def get_first_rows(data_dict: {}, divider: int) -> {}:
 
 def print_dicts(uptime_dict, avail_dict):
     # Print table header
+    print('===== Collected data =====')
     print("{:<55}{:<30}".format("Uptime (average)", "Free (average)"))
 
     # Get keys from first dictionaries
@@ -392,6 +393,7 @@ def print_dicts(uptime_dict, avail_dict):
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
         print("{:>2d}. {:<42} {:>3} up | {:<30} {:>5} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
+    print('========================\n')
 
 
 def main():
@@ -449,10 +451,8 @@ if __name__ == '__main__':
     logger.info('===== End collecting data =====\n')
     # Sort and print dicts
     if AVAIL_DICT and UPTIME_DICT:
-        print('===== Collected data =====')
         # Get sorted dicts
-        sorted_avail = sort_dict_by_value(AVAIL_DICT, key_name='available', reverse_sort=False)
-        sorted_uptime = sort_dict_by_value(UPTIME_DICT, key_name='uptime', reverse_sort=True)
+        sorted_avail = sort_dict_by_key(AVAIL_DICT, key_name='available', reverse_sort=False)
+        sorted_uptime = sort_dict_by_key(UPTIME_DICT, key_name='uptime', reverse_sort=True)
         # Print sorted dicts
         print_dicts(sorted_uptime, sorted_avail)
-        print('======================\n')
