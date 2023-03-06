@@ -371,7 +371,7 @@ def save_to_xslxs(dict_to_save: {}, filepath: str):
     wb_obj = openpyxl.Workbook()
     sheet_obj = wb_obj.active
     sheet_obj.cell(row=1, column=1).value = 'Uptime (average)'
-    sheet_obj.cell(row=1, column=4).value = 'Free (average)'
+    sheet_obj.cell(row=1, column=5).value = 'Free (average)'
     sheet_obj.cell(row=2, column=1).value = '#'
     sheet_obj.cell(row=2, column=2).value = 'Cluster'
     sheet_obj.cell(row=2, column=3).value = 'Uptime, days'
@@ -393,8 +393,8 @@ def save_to_xslxs(dict_to_save: {}, filepath: str):
         row += 1
     columns_letter = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
     for letter in columns_letter:
-        col_dim = sheet_obj.column_dimensions[letter].auto_size
-        col_dim = True
+        col_dim = sheet_obj.column_dimensions[letter]
+        col_dim.auto_size = True
     wb_obj.save(filepath)
 
 
@@ -438,6 +438,7 @@ def print_dicts(uptime_dict, avail_dict):
         # Print values
         avail_gb = round(float(value2["available"]) / 1024 / 1024, 2)
         print("{:>2d}. {:<42} {:>3} up | {:<30} {:>5} GB".format(i + 1, key, value1["uptime"], key2, avail_gb))
+        # Save values to new dictionary for xlsx file
         new_dict[i + 1] = {
             'cluster_uptime': key,
             'cluster_up_hosts': value1['hosts_count'],
