@@ -50,7 +50,7 @@ def attempt_to_auth_on_cvm(ssh_client: paramiko.SSHClient, prism_address: str) -
     logger.warning(f'Authentication failed for for cluster "{prism_address}"')
     INPUT_EVENT.set()
     sleep(3)  # wait for other threads to stop printing to console
-    temp_ssh_user = input(f'\nEnter username for cluster "{prism_address}" (Press Enter to skip auth attempt): ')
+    temp_ssh_user = input(f'\nEnter username for cluster "{prism_address}"\n(Leave empty and press Enter to skip): ')
     temp_ssh_password = ''
     if temp_ssh_user:
         temp_ssh_password = getpass.getpass(f'Enter password for user "{temp_ssh_user}": ')
@@ -244,7 +244,7 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
             logger.error(f' - Error exec command "{cmd}" on {ip}: {out_error}')
     ssh_client.close()
     # logger.info(f'  No errors')
-    save_dict_to_json(svm_dict, f'{OUTPUT_DIR}avail_{prism_address}.json')
+    save_to_json(svm_dict, f'{OUTPUT_DIR}avail_{prism_address}.json')
     # logger.info(
     #     f'+ Getting average available memory for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
     # Cut off unneeded part of dictionary
@@ -319,7 +319,7 @@ def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
             logger.error(f' - Error exec command "{cmd}" for {ip}')
     ssh_client.close()
     # logger.info(f'  No errors')
-    save_dict_to_json(svm_dict, f'{OUTPUT_DIR}uptime_{prism_address}.json')
+    save_to_json(svm_dict, f'{OUTPUT_DIR}uptime_{prism_address}.json')
     # logger.info(f'+ Getting average uptime for {prism_address} and cutting off 1/{GET_PART_ROWS} part of rows')
     # 1.Cut off unneeded part of dictionary
     # 2.Summ all uptime and get average of left CVMs
@@ -349,7 +349,7 @@ def sort_dict_by_key(dict_to_sort: {}, key_name: str, reverse_sort: True) -> {}:
     return srt_dict
 
 
-def save_dict_to_json(dict_to_save: {}, filepath: str):
+def save_to_json(dict_to_save: {}, filepath: str):
     """
     Save dictionary to json file
     :param dict_to_save: What to save
@@ -370,8 +370,6 @@ def save_to_xslxs(dict_to_save: {}, filepath: str):
     """
     wb_obj = openpyxl.Workbook()
     sheet_obj = wb_obj.active
-    sheet_obj.cell(row=1, column=1).value = 'Uptime (average)'
-    sheet_obj.cell(row=1, column=5).value = 'Free (average)'
     sheet_obj.cell(row=2, column=1).value = '#'
     sheet_obj.cell(row=2, column=2).value = 'Cluster'
     sheet_obj.cell(row=2, column=3).value = 'Uptime, days'
@@ -379,8 +377,6 @@ def save_to_xslxs(dict_to_save: {}, filepath: str):
     sheet_obj.cell(row=2, column=5).value = 'Cluster'
     sheet_obj.cell(row=2, column=6).value = 'Free memory, GB'
     sheet_obj.cell(row=2, column=7).value = 'Hosts'
-    sheet_obj.merge_cells('A1:D1')
-    sheet_obj.merge_cells('E1:G1')
     row = 3
     for i, (k, v) in enumerate(dict_to_save.items()):
         sheet_obj.cell(row=row, column=1).value = k
@@ -391,10 +387,23 @@ def save_to_xslxs(dict_to_save: {}, filepath: str):
         sheet_obj.cell(row=row, column=6).value = v['available']
         sheet_obj.cell(row=row, column=7).value = v['cluster_avail_hosts']
         row += 1
+    # Calculate and set columns width
     columns_letter = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
     for letter in columns_letter:
+        cur_max_width = 0
+        for cell in sheet_obj[letter]:
+            if cell.value is None:
+                continue
+            new_width = len(str(cell.value))
+            if new_width > cur_max_width:
+                cur_max_width = new_width
         col_dim = sheet_obj.column_dimensions[letter]
-        col_dim.auto_size = True
+        col_dim.width = cur_max_width + 1
+    # Set headers
+    sheet_obj.cell(row=1, column=1).value = 'Uptime (average)'
+    sheet_obj.cell(row=1, column=5).value = 'Free (average)'
+    sheet_obj.merge_cells('A1:D1')
+    sheet_obj.merge_cells('E1:G1')
     wb_obj.save(filepath)
 
 
@@ -511,8 +520,9 @@ if __name__ == '__main__':
         sorted_uptime = sort_dict_by_key(UPTIME_DICT, key_name='uptime', reverse_sort=True)
         # Print sorted dicts
         merged_dict = print_dicts(sorted_uptime, sorted_avail)
-        # print(merged_dict)
+        save_to_json(merged_dict, f'{OUTPUT_DIR}00_clusters_stat.json')
+        print(f'===== Data saved to {OUTPUT_DIR}00_clusters_stat.json =====\n')
         if SAVE_TO_XLSX:
-            filename = f'{OUTPUT_DIR}clusters_stat.xlsx'
+            filename = f'{OUTPUT_DIR}00_clusters_stat.xlsx'
             save_to_xslxs(merged_dict, filename)
             print(f'===== Data saved to {filename} =====\n')
