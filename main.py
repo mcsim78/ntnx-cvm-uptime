@@ -8,23 +8,31 @@ import openpyxl
 from loguru import logger
 import paramiko
 import ipaddress
+import argparse
 
 SSH_PORT = 22
 SSH_USERNAME = 'nutanix'
 SSH_PASSWORD = ''
 SSH_TIMEOUT = 5  # in seconds
+
 OUTPUT_DIR = 'output/'  # output directory for logs and result files
 INPUT_FILE = 'prism_ips.txt'
+
 GET_PART_ROWS = 3  # part of rows to get from sorted dictionary, where 3 means 1/3 of rows, 4 means 1/4 of rows, etc.
 SAVE_TO_XLSX = True  # save results to xlsx file
+# For command execution
+RUN_MODE = 'uptime'
+EXEC_COMMAND = ''
 
 # For multithreading
 AVAIL_DICT = {}
 UPTIME_DICT = {}
+ERRORS_DICT = {}
 MAX_WORKERS = 4  # not more than 10 threads!!!
 TEMP_CREDS = {}
 AVAIL_DICT_LOCK = threading.Lock()
 UPTIME_DICT_LOCK = threading.Lock()
+ERRORS_DICT_LOCK = threading.Lock()
 TEMP_CREDS_LOCK = threading.Lock()
 INPUT_EVENT = threading.Event()
 LOCK_TIMEOUT = 10  # in seconds. Max time to wait for lock release
@@ -263,6 +271,64 @@ def get_all_ssh_available_mem(prism_address: str, svm_list: []) -> {}:
     return AVAIL_DICT
 
 
+def get_log_errors(prism_address: str, svm_list: []) -> {}:
+    if not EXEC_COMMAND:
+        # Default command for getting errors from hades.out
+        cmd = "sudo grep -i 'Failed to get CVM id' ~/data/logs/hades.out | tail -n 2"
+    else:
+        cmd = EXEC_COMMAND
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    errors_dict = {}
+    # Try to get temporary credentials if they exist for this cluster, otherwise use default
+    tmp_ssh_password, tmp_ssh_user = get_tmp_creds(prism_address)
+
+    for ip in svm_list:
+        while INPUT_EVENT.is_set():
+            INPUT_EVENT.wait(LOCK_TIMEOUT)
+
+        ssh_client.close()
+        try:
+            ssh_client.connect(hostname=ip, port=SSH_PORT, username=tmp_ssh_user,
+                               password=tmp_ssh_password, timeout=SSH_TIMEOUT)
+            # sleep(0.5)
+        except Exception as e:
+            errors_dict[ip] = {
+                'logs': '',
+                'error': f'Connection failed: {e}'
+            }
+            logger.error(f' - Connection for {ip} failed: {e}')
+            continue
+        logger.info(f'+ Getting errors in logs for {ip}')
+        stdin, stdout, stderr = ssh_client.exec_command(cmd)
+        std_out = stdout.readlines()
+        out_error = stderr.readlines()
+        if not out_error and std_out:
+            logs = std_out
+            errors_dict[ip] = {
+                'logs': logs,
+                'error': 'none'
+            }
+        elif not out_error and not std_out:
+            # No errors in logs, skip
+            continue
+        else:
+            errors_dict[ip] = {
+                'logs': '',
+                'error': f'Error exec command "{cmd}"'
+            }
+            logger.error(f' - Error exec command "{cmd}" on {ip}: {out_error}')
+    ssh_client.close()
+    # logger.info(f'  No errors')
+    save_to_json(errors_dict, f'{OUTPUT_DIR}errors_{prism_address}.json')
+    # Write down to dictionary with prism_address as key and available memory as value
+    if errors_dict:
+        ERRORS_DICT_LOCK.acquire()
+        ERRORS_DICT[prism_address] = errors_dict
+        ERRORS_DICT_LOCK.release()
+    return ERRORS_DICT
+
+
 def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
     """
     Get uptime for all SVMs
@@ -309,7 +375,7 @@ def get_all_ssh_uptime(prism_address: str, svm_list: []) -> {}:
                 svm_dict[ip] = {
                     'uptime': 0,
                     'error': f'Uptime less than 1 day'
-                    }
+                }
             # uptime = std_out[0].strip()
         else:
             svm_dict[ip] = {
@@ -460,7 +526,25 @@ def print_dicts(uptime_dict, avail_dict):
     return new_dict
 
 
-def main():
+def print_dict_log_errors(dict_with_errors: dict):
+    """
+    Print dictionary with errors
+    :param dict_with_errors: Dictionary with errors
+    :return: Nothing
+    """
+    if dict_with_errors:
+        print('===== Errors =====')
+        for cluster, cvms in dict_with_errors.items():
+            if not cvms:
+                continue
+            print(f'{cluster}:')
+            for cvm, logs in cvms.items():
+                print(f'\tCVM {cvm}:')
+                for error in logs['logs']:
+                    print(f'\t\t{error.strip()}')
+
+
+def start():
     prism_addresses = get_prism_addresses_from_file(INPUT_FILE)
     if not prism_addresses:
         logger.error(f'No prism addresses found in {INPUT_FILE}')
@@ -469,7 +553,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         for prism_address in prism_addresses:
-            future = executor.submit(process_prism_address, prism_address)
+            future = executor.submit(process_prism, prism_address)
             futures.append(future)
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -478,37 +562,45 @@ def main():
                 logger.error(f'Exception: {e}')
 
 
-def process_prism_address(prism_address):
+def process_prism(prism_address):
     while INPUT_EVENT.is_set():
         INPUT_EVENT.wait(LOCK_TIMEOUT)
     svm_ips = get_svm_ips_from_server(prism_address)
     if svm_ips.success:
         svm_ips = svm_ips.data
-        # Get available memory
-        get_all_ssh_available_mem(prism_address, svm_ips)
-        # Get uptime
-        get_all_ssh_uptime(prism_address, svm_ips)
+        if RUN_MODE == 'uptime':
+            # Get available memory
+            get_all_ssh_available_mem(prism_address, svm_ips)
+            # Get uptime
+            get_all_ssh_uptime(prism_address, svm_ips)
+        elif RUN_MODE == 'check_errors':
+            # Get errors in logs
+            get_log_errors(prism_address, svm_ips)
     else:
         logger.error(f'Error get SVM IPs from {prism_address}: {svm_ips.error}')
 
 
-if __name__ == '__main__':
+def main():
+    global SSH_USERNAME, SSH_PASSWORD
     if not SSH_USERNAME:
         logger.warning('No username provided. Will be asked during script execution.')
         SSH_USERNAME = input(f'Enter SSH username that can be used on the most clusters: ')
         if not SSH_USERNAME:
-            raise Exception('No username provided.')
+            logger.error('No username provided')
+            return False
     if not SSH_PASSWORD:
         logger.warning('No password provided. Will be asked during script execution.')
         SSH_PASSWORD = getpass.getpass(
             prompt=f'Enter SSH password for user "{SSH_USERNAME}" that can be used on the most clusters: '
         )
         if not SSH_PASSWORD:
-            raise Exception('No password provided.')
+            logger.error('No password provided')
+            return False
+
     # Start collecting data
     try:
         logger.info('===== Start collecting data =====')
-        main()
+        start()
     except Exception as e:
         logger.error(f'Error: {e}')
         raise e
@@ -521,8 +613,49 @@ if __name__ == '__main__':
         # Print sorted dicts
         merged_dict = print_dicts(sorted_uptime, sorted_avail)
         save_to_json(merged_dict, f'{OUTPUT_DIR}00_clusters_stat.json')
-        print(f'===== Data saved to {OUTPUT_DIR}00_clusters_stat.json =====\n')
+        print(f'Data saved to {OUTPUT_DIR}00_clusters_stat.json\n')
         if SAVE_TO_XLSX:
             filename = f'{OUTPUT_DIR}00_clusters_stat.xlsx'
             save_to_xslxs(merged_dict, filename)
-            print(f'===== Data saved to {filename} =====\n')
+            print(f'Data saved to {filename}\n')
+    if ERRORS_DICT:
+        print_dict_log_errors(ERRORS_DICT)
+        save_to_json(ERRORS_DICT, f'{OUTPUT_DIR}00_clusters_errors.json')
+        print(f'Data saved to {OUTPUT_DIR}00_clusters_errors.json\n')
+    else:
+        print('No logs errors found')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Сбор статистики и ошибок по кластерам Prism. Запуск без параметров '
+                                                 'выполнится в режиме uptime. С количеством потоков по умолчанию (4).')
+    parser.add_argument('-m', '--mode',
+                        help='Режим запуска: '
+                             'uptime - сбор uptime и free memory; '
+                             'check_errors - проверка наличия ошибок в логах. Если выбран "check_errors" режим, '
+                             'то параметр "-cmd" обязателен.',
+                        choices=['uptime', 'check_errors'],
+                        default='uptime',
+                        )
+    parser.add_argument('-cmd', '--command', help='Строка с командой для проверки логов', type=str)
+    parser.add_argument('-w', '--workers', help='(Необязательный) Количество потоков (не более 10)',
+                        type=int, default=4, required=False)
+    # parser.add_argument('-i', '--input', help='Файл с адресами Prism', default='prism_ips.txt', required=False)
+    args = parser.parse_args()
+    if args.mode:
+        RUN_MODE = args.mode
+    if RUN_MODE == 'check_errors' and not args.command:
+        logger.error('No command provided')
+        exit(1)
+    if args.command:
+        EXEC_COMMAND = args.command
+    if args.workers:
+        MAX_WORKERS = args.workers
+    # if args.input:
+    #     INPUT_FILE = args.input
+
+    try:
+        main()
+    except Exception as e:
+        logger.error(f'Error: {e}')
+        raise e
