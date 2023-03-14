@@ -628,18 +628,17 @@ def main():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Сбор статистики и ошибок по кластерам Prism. Запуск без параметров '
-                                                 'выполнится в режиме uptime. С количеством потоков по умолчанию (4).')
+                                                 'выполнится в режиме uptime.')
     parser.add_argument('-m', '--mode',
                         help='Режим запуска: '
                              'uptime - сбор uptime и free memory; '
                              'check_errors - проверка наличия ошибок в логах. Если выбран "check_errors" режим, '
                              'то параметр "-cmd" обязателен.',
-                        choices=['uptime', 'check_errors'],
-                        default='uptime',
+                        choices=['uptime', 'check_errors'], default='uptime',
                         )
     parser.add_argument('-cmd', '--command', help='Строка с командой для проверки логов', type=str)
     parser.add_argument('-w', '--workers', help='(Необязательный) Количество потоков (не более 10)',
-                        type=int, default=4, required=False)
+                        type=int, required=False)
     # parser.add_argument('-i', '--input', help='Файл с адресами Prism', default='prism_ips.txt', required=False)
     args = parser.parse_args()
     if args.mode:
